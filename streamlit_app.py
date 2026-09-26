@@ -16,7 +16,7 @@ if not api_key:
         api_key = None
 
 client = genai.Client(api_key=api_key) if api_key else None
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.8-flash"
 
 
 def input_pdf_text(uploaded_file):
@@ -54,7 +54,15 @@ def response_data_from(text):
             lines = lines[:-1]
         cleaned = "\n".join(lines).strip()
 
-    result = json.loads(cleaned)
+    try:
+        result = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Recover a JSON object if the model adds a short explanation around it.
+        first = cleaned.find("{")
+        last = cleaned.rfind("}")
+        if first == -1 or last <= first:
+            raise
+        result = json.loads(cleaned[first:last + 1])
 
     if not isinstance(result, dict):
         raise ValueError("Gemini returned JSON, but not a JSON object.")
@@ -111,27 +119,24 @@ if submit:
                     st.error("I couldn't extract readable text from this PDF. Please upload a text-based PDF.")
                     st.stop()
 
-                response = client.models.generate_content(
+                if client is None:
+                    st.error("GOOGLE_API_KEY is not configured. Add it to Streamlit Cloud → Settings → Secrets.")
+                    st.stop()
+
+                interaction = client.interactions.create(
                     model=MODEL_NAME,
-                    contents=PROMPT.format(text=resume_text, jd=jd),
-                    config={
-                        "response_mime_type": "application/json",
-                        "response_schema": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "JD Match": {"type": "STRING"},
-                                "MissingKeywords": {
-                                    "type": "ARRAY",
-                                    "items": {"type": "STRING"},
-                                },
-                                "Profile Summary": {"type": "STRING"},
-                            },
-                            "required": ["JD Match", "MissingKeywords", "Profile Summary"],
-                        },
+                    input=PROMPT.format(text=resume_text, jd=jd),
+                    generation_config={
+                        "thinking_level": "low",
                     },
                 )
 
-                result = response_data_from(response.text)
+                response_text = getattr(interaction, "output_text", None)
+                if not response_text:
+                    # SDK versions may expose output as structured items instead.
+                    response_text = str(interaction)
+
+                result = response_data_from(response_text)
             except Exception as exc:
                 st.error(f"Analysis failed: {exc}")
                 st.stop()
