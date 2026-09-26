@@ -1,17 +1,22 @@
-import ast
 import html
 import json
 import os
 
-import google.generativeai as genai
+from google import genai
 import PyPDF2 as pdf
 import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
-api_key = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY", None)
-if api_key:
-    genai.configure(api_key=api_key)
+api_key = os.getenv("GOOGLE_API_KEY")
+if not api_key:
+    try:
+        api_key = st.secrets.get("GOOGLE_API_KEY")
+    except Exception:
+        api_key = None
+
+client = genai.Client(api_key=api_key) if api_key else None
+MODEL_NAME = "gemini-2.5-flash"
 
 
 def input_pdf_text(uploaded_file):
@@ -19,15 +24,49 @@ def input_pdf_text(uploaded_file):
     return "".join(page.extract_text() or "" for page in reader.pages)
 
 
-PROMPT = """Act as an experienced applicant tracking system for technology roles. Evaluate the resume against the job description and give practical, accurate guidance. Return only a JSON object using this exact schema: {\"JD Match\": \"%\", \"MissingKeywords\": [], \"Profile Summary\": \"\"}.\n\nResume:\n{text}\n\nJob description:\n{jd}"""
+PROMPT = """Act as an experienced applicant tracking system for technology roles.
+Evaluate the resume against the job description and give practical, accurate guidance.
+
+Return:
+1. JD Match as a percentage string from 0% to 100%.
+2. MissingKeywords as a concise list of important skills, technologies, qualifications, or role-specific phrases that appear relevant to the job description but are not clearly represented in the resume.
+3. Profile Summary as a concise explanation of the candidate's fit and the most useful improvements.
+
+Resume:
+{text}
+
+Job description:
+{jd}"""
+
 
 
 def response_data_from(text):
-    cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        return ast.literal_eval(cleaned)
+    if not text:
+        raise ValueError("Gemini returned an empty response.")
+
+    cleaned = text.strip()
+
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].strip().lower().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
+    result = json.loads(cleaned)
+
+    if not isinstance(result, dict):
+        raise ValueError("Gemini returned JSON, but not a JSON object.")
+
+    result.setdefault("JD Match", "N/A")
+    result.setdefault("MissingKeywords", [])
+    result.setdefault("Profile Summary", "")
+
+    if not isinstance(result["MissingKeywords"], list):
+        result["MissingKeywords"] = [str(result["MissingKeywords"])]
+
+    return result
 
 
 st.set_page_config(page_title="ResuTrack — Resume analysis", layout="wide", page_icon="✦")
@@ -65,10 +104,39 @@ if submit:
             st.error("The analysis service is not configured. Add GOOGLE_API_KEY to Streamlit Community Cloud secrets.")
             st.stop()
         with st.spinner("Reading the match…"):
-            resume_text = input_pdf_text(uploaded_file)
-            response = genai.GenerativeModel("gemini-pro").generate_content(PROMPT.format(text=resume_text, jd=jd)).text
+            try:
+                resume_text = input_pdf_text(uploaded_file)
+
+                if not resume_text.strip():
+                    st.error("I couldn't extract readable text from this PDF. Please upload a text-based PDF.")
+                    st.stop()
+
+                response = client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=PROMPT.format(text=resume_text, jd=jd),
+                    config={
+                        "response_mime_type": "application/json",
+                        "response_schema": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "JD Match": {"type": "STRING"},
+                                "MissingKeywords": {
+                                    "type": "ARRAY",
+                                    "items": {"type": "STRING"},
+                                },
+                                "Profile Summary": {"type": "STRING"},
+                            },
+                            "required": ["JD Match", "MissingKeywords", "Profile Summary"],
+                        },
+                    },
+                )
+
+                result = response_data_from(response.text)
+            except Exception as exc:
+                st.error(f"Analysis failed: {exc}")
+                st.stop()
+
         try:
-            result = response_data_from(response)
             keywords = result.get("MissingKeywords", []) or []
             keyword_count = len(keywords)
             preview_keywords = ", ".join(map(str, keywords[:3])) or "No priority phrases found"
