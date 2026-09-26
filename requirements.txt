@@ -1,4 +1,4 @@
-google-genai
-PyPDF2
-streamlit
-python-dotenv
+streamlit>=1.42,<2
+google-generativeai>=0.8,<1
+PyPDF2>=3,<4
+python-dotenv>=1,<2
