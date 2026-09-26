@@ -1,22 +1,17 @@
+import ast
 import html
 import json
 import os
 
-from google import genai
+import google.generativeai as genai
 import PyPDF2 as pdf
 import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
-api_key = os.getenv("GOOGLE_API_KEY")
-if not api_key:
-    try:
-        api_key = st.secrets.get("GOOGLE_API_KEY")
-    except Exception:
-        api_key = None
-
-client = genai.Client(api_key=api_key) if api_key else None
-MODEL_NAME = "gemini-3.8-flash"
+api_key = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY", None)
+if api_key:
+    genai.configure(api_key=api_key)
 
 
 def input_pdf_text(uploaded_file):
@@ -24,57 +19,15 @@ def input_pdf_text(uploaded_file):
     return "".join(page.extract_text() or "" for page in reader.pages)
 
 
-PROMPT = """Act as an experienced applicant tracking system for technology roles.
-Evaluate the resume against the job description and give practical, accurate guidance.
-
-Return:
-1. JD Match as a percentage string from 0% to 100%.
-2. MissingKeywords as a concise list of important skills, technologies, qualifications, or role-specific phrases that appear relevant to the job description but are not clearly represented in the resume.
-3. Profile Summary as a concise explanation of the candidate's fit and the most useful improvements.
-
-Resume:
-{text}
-
-Job description:
-{jd}"""
-
+PROMPT = """Act as an experienced applicant tracking system for technology roles. Evaluate the resume against the job description and give practical, accurate guidance. Return only a JSON object using this exact schema: {\"JD Match\": \"%\", \"MissingKeywords\": [], \"Profile Summary\": \"\"}.\n\nResume:\n{text}\n\nJob description:\n{jd}"""
 
 
 def response_data_from(text):
-    if not text:
-        raise ValueError("Gemini returned an empty response.")
-
-    cleaned = text.strip()
-
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if lines and lines[0].strip().lower().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-
+    cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
-        result = json.loads(cleaned)
+        return json.loads(cleaned)
     except json.JSONDecodeError:
-        # Recover a JSON object if the model adds a short explanation around it.
-        first = cleaned.find("{")
-        last = cleaned.rfind("}")
-        if first == -1 or last <= first:
-            raise
-        result = json.loads(cleaned[first:last + 1])
-
-    if not isinstance(result, dict):
-        raise ValueError("Gemini returned JSON, but not a JSON object.")
-
-    result.setdefault("JD Match", "N/A")
-    result.setdefault("MissingKeywords", [])
-    result.setdefault("Profile Summary", "")
-
-    if not isinstance(result["MissingKeywords"], list):
-        result["MissingKeywords"] = [str(result["MissingKeywords"])]
-
-    return result
+        return ast.literal_eval(cleaned)
 
 
 st.set_page_config(page_title="ResuTrack — Resume analysis", layout="wide", page_icon="✦")
@@ -112,36 +65,10 @@ if submit:
             st.error("The analysis service is not configured. Add GOOGLE_API_KEY to Streamlit Community Cloud secrets.")
             st.stop()
         with st.spinner("Reading the match…"):
-            try:
-                resume_text = input_pdf_text(uploaded_file)
-
-                if not resume_text.strip():
-                    st.error("I couldn't extract readable text from this PDF. Please upload a text-based PDF.")
-                    st.stop()
-
-                if client is None:
-                    st.error("GOOGLE_API_KEY is not configured. Add it to Streamlit Cloud → Settings → Secrets.")
-                    st.stop()
-
-                interaction = client.interactions.create(
-                    model=MODEL_NAME,
-                    input=PROMPT.format(text=resume_text, jd=jd),
-                    generation_config={
-                        "thinking_level": "low",
-                    },
-                )
-
-                response_text = getattr(interaction, "output_text", None)
-                if not response_text:
-                    # SDK versions may expose output as structured items instead.
-                    response_text = str(interaction)
-
-                result = response_data_from(response_text)
-            except Exception as exc:
-                st.error(f"Analysis failed: {exc}")
-                st.stop()
-
+            resume_text = input_pdf_text(uploaded_file)
+            response = genai.GenerativeModel("gemini-pro").generate_content(PROMPT.format(text=resume_text, jd=jd)).text
         try:
+            result = response_data_from(response)
             keywords = result.get("MissingKeywords", []) or []
             keyword_count = len(keywords)
             preview_keywords = ", ".join(map(str, keywords[:3])) or "No priority phrases found"
