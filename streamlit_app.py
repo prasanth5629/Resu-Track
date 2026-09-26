@@ -10,9 +10,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY", None)
-
-client = genai.Client(api_key=api_key) if api_key else None
-
+if api_key:
+    genai.configure(api_key=api_key)
 
 
 def input_pdf_text(uploaded_file):
@@ -20,18 +19,8 @@ def input_pdf_text(uploaded_file):
     return "".join(page.extract_text() or "" for page in reader.pages)
 
 
-PROMPT = """Act as an experienced applicant tracking system for technology roles.
-Evaluate the resume against the job description and give practical, accurate guidance.
+PROMPT = """Act as an experienced applicant tracking system for technology roles. Evaluate the resume against the job description and give practical, accurate guidance. Return only a JSON object using this exact schema: {\"JD Match\": \"%\", \"MissingKeywords\": [], \"Profile Summary\": \"\"}.\n\nResume:\n{text}\n\nJob description:\n{jd}"""
 
-Return only a JSON object using this exact schema:
-{{"JD Match": "%", "MissingKeywords": [], "Profile Summary": ""}}
-
-Resume:
-{text}
-
-Job description:
-{jd}
-"""
 
 def response_data_from(text):
     cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
@@ -77,12 +66,7 @@ if submit:
             st.stop()
         with st.spinner("Reading the match…"):
             resume_text = input_pdf_text(uploaded_file)
-            response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=PROMPT.format(text=resume_text, jd=jd)
-            )
-
-            response_text = response.text
+            response = genai.GenerativeModel("gemini-pro").generate_content(formatted_prompt).text
         try:
             result = response_data_from(response)
             keywords = result.get("MissingKeywords", []) or []
